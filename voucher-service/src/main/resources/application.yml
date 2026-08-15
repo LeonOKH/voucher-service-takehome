@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:campaigndb;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+  sql:
+    init:
+      mode: always
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.prizm.campaign: INFO
