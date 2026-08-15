@@ -7,12 +7,16 @@ import com.prizm.campaign.model.Voucher;
 import com.prizm.campaign.repository.CampaignRepository;
 import com.prizm.campaign.repository.RedemptionRepository;
 import com.prizm.campaign.repository.VoucherRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Date;
+import java.util.Optional;
 
 @Service
 public class VoucherService {
@@ -31,12 +35,31 @@ public class VoucherService {
     @Autowired
     private AuditClient auditClient;
 
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    @Transactional
     public RedeemResponse redeem(String code, String userId) {
 
         Voucher voucher = voucherRepository.findByCode(code);
         if (voucher == null) {
             return RedeemResponse.fail("Voucher not found");
         }
+
+        // Lock the campaign row first. Every redemption for this campaign takes
+        // this same lock, so they serialize: the per-user count, the stock
+        // check, and the voucher status check below all run against committed
+        // state, one redemption at a time.
+        Optional<Campaign> campaignOpt = campaignRepository.findByIdForUpdate(voucher.getCampaignId());
+        if (campaignOpt.isEmpty()) {
+            return RedeemResponse.fail("Campaign not found");
+        }
+        Campaign campaign = campaignOpt.get();
+
+        // The voucher was read before we held the lock, so its status may be
+        // stale if another redemption committed while we waited. Refresh it now
+        // that redemptions for this campaign are serialized behind us.
+        entityManager.refresh(voucher);
 
         if ("REDEEMED".equals(voucher.getStatus())) {
             return RedeemResponse.fail("Voucher already redeemed");
@@ -46,14 +69,17 @@ public class VoucherService {
             return RedeemResponse.fail("Voucher is void");
         }
 
-        Campaign campaign = campaignRepository.findById(voucher.getCampaignId()).get();
-
         if (!campaign.isActive()) {
             return RedeemResponse.fail("Campaign is not active");
         }
 
         if (campaign.getRemainingStock() <= 0) {
             return RedeemResponse.fail("Campaign out of stock");
+        }
+
+        long userRedemptions = redemptionRepository.countByCampaignIdAndUserId(campaign.getId(), userId);
+        if (userRedemptions >= campaign.getPerUserLimit()) {
+            return RedeemResponse.fail("Per-user redemption limit reached");
         }
 
         voucher.setStatus("REDEEMED");
